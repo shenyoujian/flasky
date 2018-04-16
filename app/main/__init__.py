@@ -10,4 +10,4 @@ from flask import Blueprint
 
 main = Blueprint('main', __name__)
 
-from .import views, errors #这必须放到最后
+from .import views, errors  # 这必须放到最后

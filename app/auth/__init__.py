@@ -7,5 +7,5 @@
 
 from flask import Blueprint
 
-auth = Blueprint('auth',__name__)             #1、蓝本的包构造文件创建蓝本对象
-from . import views                           #2、再从views.py模块中引入路由
+auth = Blueprint('auth',__name__)             # 1、蓝本的包构造文件创建蓝本对象
+from . import views                           # 2、再从views.py模块中引入路由
