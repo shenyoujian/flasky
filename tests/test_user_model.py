@@ -35,7 +35,11 @@ class UserModelTestCase(unittest.TestCase):
         self.assertTrue(u.can(Permission.WRITE_ARTICLES))
         self.assertFalse(u.can(Permission.MODERATE_COMMENTS))
 
-
     def test_annoymous_user(self):
         u = AnonymousUser()
         self.assertFalse(u.can(Permission.FOLLOW))
+
+    def test_change_email_request(self):
+        u = User.query.get_or_404(56)
+        self.assertTrue( u.generate_email_change_token('1111@example.com'))
+        self.assertTrue(u.email == '1111@example.com')
