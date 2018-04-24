@@ -11,11 +11,13 @@ from flask_moment import Moment
 from flask_sqlalchemy import SQLAlchemy
 from config import config
 from flask_login import LoginManager
+from flask_pagedown import PageDown
 
 bootstrap = Bootstrap()
 mail = Mail()
 moment = Moment()
 db = SQLAlchemy()
+pagedown = PageDown()
 
 login_manager = LoginManager()
 login_manager.session_protection = 'strong'
@@ -31,8 +33,9 @@ def create_app(config_name):
     mail.init_app(app)
     moment.init_app(app)
     db.init_app(app)
+    pagedown.init_app(app)    # 初始化flask-pagedown
 
-    #在工厂函数中注册蓝本
+    # 在工厂函数中注册蓝本
     from .main import main as main_blueprint
     app.register_blueprint(main_blueprint)
     from .auth import auth as auth_blueprint
@@ -40,7 +43,7 @@ def create_app(config_name):
 
     login_manager.init_app(app)
 
-    #附加路由和自定义的错误页面
+    # 附加路由和自定义的错误页面
 
     return app
 

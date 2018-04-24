@@ -12,14 +12,16 @@ from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
 from flask import current_app, request
 from datetime import datetime
 import hashlib
+from markdown import markdown
+import bleach
 
 
 class Permission:                                                       # 权限类
-    FOLLOW = 0X01
-    COMMENT = 0X02
-    WRITE_ARTICLES = 0X04
-    MODERATE_COMMENTS = 0X08
-    ADMINISTER = 0X80
+    FOLLOW = 1
+    COMMENT = 2
+    WRITE_ARTICLES = 4
+    MODERATE_COMMENTS = 8
+    ADMINISTER = 16
 
 
 class AnonymousUser(AnonymousUserMixin):                                # 程序不用先检查用户是否登录，就能调用
@@ -28,6 +30,14 @@ class AnonymousUser(AnonymousUserMixin):                                # 程序
 
     def is_administrator(self):
         return False
+
+
+# 用户关注关联表， 这是多
+class Follow(db.Model):
+    __tablename__ = 'follows'
+    follower_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)    # 关注者id
+    followed_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)    # 被关注者id
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class Role(db.Model):
@@ -50,6 +60,7 @@ class Role(db.Model):
                          Permission.MODERATE_COMMENTS, False),
             'Administrator': (0xff, False)
         }
+        default_role = 'User'
         for r in roles:
             role = Role.query.filter_by(name=r).first()
             if role is None:
@@ -60,7 +71,7 @@ class Role(db.Model):
         db.session.commit()
 
     def __repr__(self):
-        return '<Role %t>' % self.name
+        return '<Role %r>' % self.name
 
 
 class User(UserMixin, db.Model):
@@ -78,9 +89,19 @@ class User(UserMixin, db.Model):
     avatar_hash = db.Column(db.String(32))
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'))
     posts = db.relationship('Post', backref='author', lazy='dynamic')
+    # 使用两个一对多关系实现多对多关系,这是一,followed是self关注的人，follower关注self的人
+    followed = db.relationship('Follow', foreign_keys=[Follow.follower_id],
+                         backref=db.backref('follower', lazy='joined'),
+                         lazy='dynamic',
+                         cascade='all, delete-orphan')
+    followers = db.relationship('Follow', foreign_keys=[Follow.followed_id],
+                         backref=db.backref('followed', lazy='joined'),
+                         lazy='dynamic',
+                         cascade='all, delete-orphan')
 
     def __init__(self, **kwargs):
         super(User, self).__init__(**kwargs)
+        self.follow(self)
         if self.role is None:
             if self.email == current_app.config['FLASKY_ADMIN']:
                 self.role = Role.query.filter_by(permissions=0xff).first()
@@ -173,16 +194,75 @@ class User(UserMixin, db.Model):
         return hashlib.md5(self.email.lower().encode('utf-8')).hexdigest()
 
     def gravatar(self, size=100, default='identicon', rating='g'):
-        if request.is_secure:
-            url = 'http://secure.gravatar.com/avatar'
-        else:
-            url = 'http://www.gravatar.com/avatar'
-        hash = hashlib.md5(self.email.encode('utf-8')).hexdigest()
+        url = 'https://secure.gravatar.com/avatar'
+        hash = self.avatar_hash or self.gravatar_hash()
         return '{url}/{hash}?s={size}&d={default}&r={rating}'.format(
             url=url, hash=hash, size=size, default=default, rating=rating)
 
+    # 生成虚拟用户和博客文章
+    @staticmethod
+    def generate_fake(count=100):
+        from sqlalchemy.exc import IntegrityError
+        from random import seed
+        import forgery_py
+
+        seed()
+        for i in range(count):
+            u = User(email=forgery_py.internet.email_address(),
+                     username=forgery_py.internet.user_name(True),
+                     password=forgery_py.lorem_ipsum.word(),
+                     confirmed=True,
+                     name=forgery_py.name.full_name(),
+                     location=forgery_py.address.city(),
+                     about_me=forgery_py.lorem_ipsum.sentence(),
+                     member_since=forgery_py.date.date(True))
+            db.session.add(u)
+            try:
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+
+    # 关注别人
+    def follow(self, user):
+        if not self.is_following(user):                 # self当前用户是否已经关注了user
+            f = Follow(follower=self, followed=user)    # 没有关注就实例化一个关联表数据并存入数据库
+            db.session.add(f)
+
+    # 取消关注
+    def unfollow(self, user):
+        f = self.followed.filter_by(followed_id=user.id).first()
+        if f:
+            db.session.delete(f)
+
+    # 判断self是否关注user
+    def is_following(self, user):
+        if user.id is None:
+            return False
+        return self.followed.filter_by(followed_id=user.id).first() is not None
+
+    # 判断user是否有关注self
+    def is_followed_by(self, user):
+        if user.id is None:
+            return False
+        return self.followers.filter_by(follower_id=user.id).first() is not None
+
+    # 把用户设为自己的关注者
+    @staticmethod
+    def add_self_follows():
+        for user in User.query.all():
+            if not user.is_following(user):
+                user.follow(user)
+                db.session.add(user)
+                db.session.commit()
+
+    # 使用连结查询出关注用户的文章
+    @property
+    def followed_posts(self):
+        return Post.query.join(Follow, Follow.followed_id==Post.author_id)\
+            .filter(Follow.follower_id==self.id)
+
     def __repr__(self):
-        return '<User %t>' % self.username
+        return '<User %r>' % self.username
 
 
 class Post(db.Model):
@@ -190,18 +270,40 @@ class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     body = db.Column(db.Text)
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
+    body_html = db.Column(db.Text)
     author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+
+    @staticmethod
+    def generate_fake(count=100):
+        from random import seed, randint
+        import forgery_py
+
+        seed()
+        user_count = User.query.count()
+        for i in range(count):
+            u = User.query.offset(randint(0, user_count-1)).first()
+            p = Post(body=forgery_py.lorem_ipsum.sentences(randint(1, 3)),
+                     timestamp=forgery_py.date.date(True),
+                     author=u)
+            db.session.add(p)
+            db.session.commit()
+
+    @staticmethod
+    def on_changed_body(target, value, oldvalue, initiator):
+        allowed_tags = ['a', 'abbr', 'acronym', 'b', 'blockquote', 'code',
+                        'em', 'i', 'li', 'ol', 'pre', 'strong', 'ul',
+                        'h1', 'h2', 'h3', 'p']
+        target.body_html = bleach.linkify(bleach.clean(
+            markdown(value, output_form='html'),
+            tags=allowed_tags, strip=True))
+
+
+db.event.listen(Post.body, 'set', Post.on_changed_body)
 
 
 @login_manager.user_loader                                              # 加载用户的回调函数
 def load_user(user_id):
     return User.query.get(int(user_id))
-
-
-
-
-
-
 
 
 login_manager.anonymous_user = AnonymousUser
